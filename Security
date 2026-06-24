@@ -1,0 +1,172 @@
+
+@Service
+public class JWTService {
+	@Value("${jwt.secret}")
+	private String secretkey;
+	
+	public String generateToken(String username,String role) {
+		Map<String,Object> m=new HashMap<String, Object>();
+		m.put("role", role);
+		return Jwts.builder()
+				.claims()
+				.add(m)
+				.subject(username)
+				.issuedAt(new Date(System.currentTimeMillis()))
+				.expiration(new Date(System.currentTimeMillis()+1000*60*60*30))
+				.and()
+				.signWith(getkey())
+				.compact();
+	}
+
+	private Key getkey() {
+		return Keys.hmacShaKeyFor(secretkey.getBytes());
+	}
+//	
+
+	public String extractUsername(String token) {
+		return Jwts.parser()
+				.verifyWith((SecretKey) getkey())
+				.build()
+				.parseSignedClaims(token)
+				.getPayload()
+				.getSubject();
+	}
+	
+	public Date expirationToken(String token) {
+		return Jwts.parser()
+				.verifyWith((SecretKey) getkey())
+				.build()
+				.parseSignedClaims(token)
+				.getPayload()
+				.getExpiration();
+	}
+	
+	public boolean isTokenExpired(String token) {
+		return expirationToken(token).before(new Date());
+	}
+
+	public boolean validateToken(String token,String username) {
+		final String user=extractUsername(token);
+		return user.equals(username)&&!isTokenExpired(token);
+	}
+	
+	public String extractRole(String token) {
+		return Jwts.parser()
+				.verifyWith((SecretKey) getkey())
+				.build()
+				.parseSignedClaims(token)
+				.getPayload()
+				.get("role",String.class);
+	}
+}
+
+
+
+
+package com.example.db_security.configuration;
+
+import java.security.KeyStore.PasswordProtection;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.config.Customizer;
+import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+
+import com.example.db_security.jwtfilter.Jwtfilter;
+
+@Configuration
+public class SecurityConf {
+	@Autowired
+	private Jwtfilter jwtfilter;
+	
+	@Bean
+	public PasswordEncoder passwordEncoder() {
+		return new BCryptPasswordEncoder();
+	}
+	
+	@Bean
+	public SecurityFilterChain securityFilterChain(
+	        HttpSecurity http) throws Exception {
+
+	    http
+	    	.csrf(csrf -> csrf.disable())
+	        .authorizeHttpRequests(auth -> auth
+	        		.requestMatchers("/save","/login").permitAll()
+	        		.requestMatchers("/admin").hasRole("ADMIN")
+	        		.requestMatchers("/user").hasRole("USER")
+	                .anyRequest()
+	                .authenticated());
+	     // Add JWT Filter here
+	     http.addFilterBefore(jwtfilter, UsernamePasswordAuthenticationFilter.class);
+//	        .httpBasic(Customizer.withDefaults());
+
+	    return http.build();
+	}
+	
+	@Bean
+	public AuthenticationManager authenticationManager(AuthenticationConfiguration configuration) throws Exception {
+		return configuration.getAuthenticationManager();
+	}
+}
+
+
+
+package com.example.db_security.jwtfilter;
+
+import java.io.IOException;
+import java.util.Collections;
+import java.util.List;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.GrantedAuthority;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.stereotype.Component;
+import org.springframework.web.filter.OncePerRequestFilter;
+
+import com.example.db_security.service.JWTService;
+
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+@Component
+public class Jwtfilter extends OncePerRequestFilter{
+	@Autowired
+	private JWTService jwtService;
+	@Override
+	protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
+			throws ServletException, IOException {
+		String HeaderRequest=request.getHeader("Authorization");
+		String username=null;
+		String token=null;
+		if(HeaderRequest!=null && HeaderRequest.startsWith("Bearer ")) {
+			token=HeaderRequest.substring(7);
+			username=jwtService.extractUsername(token);
+			if(username!=null && jwtService.validateToken(token,username)
+					&& SecurityContextHolder.getContext().getAuthentication()==null) {
+				String role=jwtService.extractRole(token);
+				List<GrantedAuthority> authorities=List.of(new SimpleGrantedAuthority("Role_"+role));
+				UsernamePasswordAuthenticationToken authenticationToken=
+						new UsernamePasswordAuthenticationToken(username,null,
+								authorities);
+				
+				SecurityContextHolder.getContext().setAuthentication(authenticationToken);
+			}
+		}
+		filterChain.doFilter(request, response);
+	}
+	
+		
+	
+	
+}
